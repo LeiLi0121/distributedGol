@@ -19,12 +19,12 @@ type distributorChannels struct {
 }
 
 // distributor divides the work between workers and interacts with other goroutines.
-// distributor divides the work between workers and interacts with other goroutines.
 func distributor(p Params, c distributorChannels) {
 	// TODO: Create a 2D slice to store the world.
 	fileName := fmt.Sprintf("%dx%d", p.ImageHeight, p.ImageWidth)
 	c.ioCommand <- ioCommand(1)
 	c.ioFilename <- fileName
+	stopChan = make(chan bool, 2)
 	//world recieve the image from io-----------------------------------------------------------------------------------
 	world := make([][]uint8, p.ImageHeight)
 	for i := range world {
@@ -45,8 +45,7 @@ func distributor(p Params, c distributorChannels) {
 		}
 	}
 
-	//stopChan := make(chan bool, 1)
-	//server := "54.164.24.79:8030"
+	//server := "107.22.25.217:8030"
 	server := "127.0.0.1:8030"
 	client, _ := rpc.Dial("tcp", server)
 	defer client.Close()
@@ -54,37 +53,29 @@ func distributor(p Params, c distributorChannels) {
 	defer ticker.Stop()
 	sdlTicker := time.NewTicker(30 * time.Millisecond)
 	defer sdlTicker.Stop()
-	//var mutex sync.Mutex
-	//var wg sync.WaitGroup
-	//
-	//go func() {
-	//	for {
-	//		select {
-	//		case <-sdlTicker.C:
-	//			//mutex.Lock()
-	//			wg.Add(1)
-	//			//mutex.Unlock()
-	//			req := new(Request)
-	//			req.P = p
-	//			res := new(Response)
-	//			client.Call("GolOp.Live", req, res)
-	//			//res.NewWorld = make([][]uint8, req.P.ImageHeight)
-	//			//for i := range res.NewWorld {
-	//			//	res.NewWorld[i] = make([]uint8, req.P.ImageWidth)
-	//			//}
-	//			for i := 0; i < p.ImageHeight; i++ {
-	//				for k := 0; k < p.ImageWidth; k++ {
-	//					if res.NewWorld[i][k] != world[i][k] {
-	//						c.events <- CellFlipped{CompletedTurns: res.CurrentTurn, Cell: util.Cell{X: k, Y: i}}
-	//					}
-	//				}
-	//			}
-	//			c.events <- TurnComplete{CompletedTurns: res.CurrentTurn}
-	//			copyWhole(world, res.NewWorld)
-	//			wg.Done()
-	//		}
-	//	}
-	//}()
+
+	go func() {
+		for {
+			select {
+			case <-sdlTicker.C:
+				req := new(Request)
+				req.P = p
+				res := new(Response)
+				client.Call("GolOp.Live", req, res)
+				for i := 0; i < p.ImageHeight; i++ {
+					for k := 0; k < p.ImageWidth; k++ {
+						if res.NewWorld[i][k] != world[i][k] {
+							c.events <- CellFlipped{CompletedTurns: res.CurrentTurn, Cell: util.Cell{X: k, Y: i}}
+						}
+					}
+				}
+				c.events <- TurnComplete{CompletedTurns: res.CurrentTurn}
+				copyWhole(world, res.NewWorld)
+			case <-stopChan:
+				return
+			}
+		}
+	}()
 	go func() {
 		for {
 			select {
@@ -129,12 +120,6 @@ func distributor(p Params, c distributorChannels) {
 						c.events <- ImageOutputComplete{CompletedTurns: res.CurrentTurn, Filename: fileName}
 					}()
 					client.Call(KillProcess, key, res)
-					c.events <- res.Final
-					// Make sure that the Io has finished any output before exiting.
-					c.ioCommand <- ioCheckIdle
-					<-c.ioIdle
-					c.events <- StateChange{res.CurrentTurn, Quitting}
-					// Close the channel to stop the SDL goroutine gracefully. Removing may cause deadlock.
 					close(c.events)
 					os.Exit(0)
 				case 'p':
@@ -174,16 +159,10 @@ func distributor(p Params, c distributorChannels) {
 					key := KeyPress{Key: 'q', P: p}
 					res := new(Response)
 					client.Call(ExecuteKey, key, res)
-					//// Make sure that the Io has finished any output before exiting.
-					//c.ioCommand <- ioCheckIdle
-					//<-c.ioIdle
-					//c.events <- StateChange{res.CurrentTurn, Quitting}
-					//// Close the channel to stop the SDL goroutine gracefully. Removing may cause deadlock.
-					//close(c.events)
 					os.Exit(0)
 				}
-				//case <-stopChan:
-				//	return
+			case <-stopChan:
+				return
 			}
 		}
 	}()
@@ -195,12 +174,10 @@ func distributor(p Params, c distributorChannels) {
 	<-c.ioIdle
 	c.events <- StateChange{turn, Quitting}
 	// Close the channel to stop the SDL goroutine gracefully. Removing may cause deadlock.
-	//mutex.Lock()
-	//wg.Wait()
-	//mutex.Unlock()
 	close(c.events)
-	//stopChan <- true
 }
+
+var stopChan chan bool
 
 func makeCall(client *rpc.Client, world [][]uint8, p Params, c distributorChannels) {
 	request := Request{world, p}
@@ -216,6 +193,8 @@ func makeCall(client *rpc.Client, world [][]uint8, p Params, c distributorChanne
 		}
 	}
 	c.events <- ImageOutputComplete{CompletedTurns: p.Turns, Filename: fileName}
+	stopChan <- true
+	stopChan <- true
 
 }
 func copyWhole(dst, src [][]uint8) {
